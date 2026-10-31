@@ -383,6 +383,3 @@ app.get('/', (req,res) => res.send(`Mestiere Bridge v6 FINAL - ${new Date().toIS
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Bridge v6 su ${PORT}`));
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Bridge v4 su ${PORT}`));

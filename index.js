@@ -233,6 +233,86 @@ app.post('/simulate-message', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+// --- 8. NOTIFICA CLIENTE QUANDO IDRAULICO IMPOSTA/SPOSTA APPUNTAMENTO ---
+app.post('/notify-client', async (req, res) => {
+  try {
+    const { jobId } = req.body;
+    if (!jobId) return res.status(400).json({ error: "Serve jobId" });
+
+    // 1. Prendi il lavoro da Firestore
+    const jobDoc = await db.collection('jobs').doc(jobId).get();
+    if (!jobDoc.exists) return res.status(404).json({ error: "Job non trovato" });
+    const job = jobDoc.data();
+
+    const clientPhone = job.clientPhone;
+    const professionalId = cleanName(job.professionalId);
+    const appointmentAt = job.appointmentAt ? new Date(job.appointmentAt.seconds ? job.appointmentAt.toDate() : job.appointmentAt) : null;
+
+    if (!clientPhone) return res.status(400).json({ error: "Manca clientPhone" });
+
+    // 2. Prendi info professionista per nome + professione
+    let professionalName = job.professionalName || "Marco";
+    let professione = job.profession || "l'idraulico"; // default
+
+    try {
+      const profDoc = await db.collection('professionals').doc(professionalId).get();
+      if (profDoc.exists) {
+        const pData = profDoc.data();
+        professionalName = pData.name || pData.displayName || professionalName;
+        professione = pData.category || pData.professione || professione;
+        // Se category è "idraulico" lo trasformiamo in "l'idraulico"
+        if (!professione.startsWith("l'") && !professione.startsWith("il ")) {
+           professione = `l'${professione}`;
+        }
+      }
+    } catch(e){ console.log("Prof not found, uso default"); }
+
+    // Se professione è nel professionalId (es: idraulico_test_torino)
+    if (professione === "l'idraulico" && professionalId.includes("idraulico")) professione = "l'idraulico";
+    if (professionalId.includes("elettricista")) professione = "l'elettricista";
+    if (professionalId.includes("fabbro")) professione = "il fabbro";
+
+    // 3. Crea messaggio - Opzione 1 col tuo tocco
+    let dataFormattata = "appena possibile";
+    if (appointmentAt) {
+      dataFormattata = appointmentAt.toLocaleString('it-IT', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
+    }
+    
+    const isUpdate = job.lastNotifiedAt ? true : false;
+    
+    let message;
+    if (isUpdate) {
+      message = `Ciao! Sono ${professionalName} ${professione} 👋\nAggiornamento: appuntamento spostato a ${dataFormattata} in ${job.appointmentAddress || job.description || ''}\n\nA dopo!`;
+    } else {
+      message = `Ciao! Sono ${professionalName} ${professione} 👋\nTi confermo l'appuntamento per ${dataFormattata}${job.appointmentAddress ? ` in ${job.appointmentAddress}` : ''}\n\nSe hai bisogno scrivimi qui su WhatsApp!`;
+    }
+
+    // 4. Invia su WhatsApp tramite Evolution
+    try {
+      await axios.post(`${EVOLUTION_URL}/message/sendText/${professionalId}`, {
+        number: clientPhone,
+        text: message
+      }, { headers: { apikey: EVOLUTION_APIKEY } });
+    } catch (evoErr) {
+      console.log("Evolution send warning (normale se non sei collegato):", evoErr.response?.data || evoErr.message);
+      // Non blocchiamo, così puoi testare anche con il simulatore
+    }
+
+    // 5. Salva che abbiamo notificato
+    await db.collection('jobs').doc(jobId).update({
+      lastNotifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+      lastNotificationText: message,
+      status: 'programmato'
+    });
+
+    res.json({ success: true, sentTo: clientPhone, message: message, note: "Se Evolution non è collegato, il messaggio è salvato ma non inviato su WhatsApp - appena colleghi WhatsApp partirà" });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // --- HOME ---
 app.get('/', (req,res) => res.send(`Mestiere Bridge v4 OK - Auto-pairing ready - ${new Date().toISOString()}`));
 

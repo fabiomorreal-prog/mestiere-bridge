@@ -34,7 +34,22 @@ app.post('/create-instance', async (req, res) => {
     res.status(500).json({ error: err.response?.data || err.message });
   }
 });
-
+// TEST FACILE DA BROWSER - crea idraulico con GET
+app.get('/create-instance/:professionalId', async (req, res) => {
+  const pid = req.params.professionalId;
+  const instanceName = pid.toLowerCase().replace(/[^a-z0-9_]/g, "_");
+  try {
+    await axios.post(`${EVOLUTION_URL}/instance/create`, {
+      instanceName, qrcode: true, integration: "WHATSAPP-BAILEYS"
+    }, { headers: { apikey: EVOLUTION_APIKEY } });
+    await db.collection('professionals').doc(instanceName).set({
+      professionalId: instanceName, status: 'created', createdAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    res.json({ success: true, instance: instanceName, next: `/pairing-code/${instanceName}` });
+  } catch (err) {
+    res.status(500).json({ error: err.response?.data || err.message });
+  }
+});
 app.get('/pairing-code/:instance', async (req, res) => {
   try {
     const r = await axios.get(`${EVOLUTION_URL}/instance/connect/${req.params.instance}`, {

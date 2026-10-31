@@ -171,37 +171,75 @@ app.get('/status/:instance', async (req, res) => {
   }
 });
 
-// --- 6. WEBHOOK: ARRIVO MESSAGGI -> FIREBASE JOBS (isolato per idraulico) ---
-app.post('/webhook', async (req, res) => {
+// --- WEBHOOK POTENZIATO: Messaggio in entrata + Risposta cliente ---
+app.post('/webhook/:instance', async (req, res) => {
   try {
-    const instanceName = req.body.instance || req.body.instanceName || 'unknown';
-    const data = req.body.data;
-    const txt = data?.message?.conversation || data?.message?.extendedTextMessage?.text || "";
-    const jid = data?.key?.remoteJid || "";
+    const instanceName = cleanName(req.params.instance);
+    const payload = req.body;
     
-    // Filtri sicurezza
-    if (data?.key?.fromMe) return res.sendStatus(200); // non salvare i miei messaggi
-    if (jid.includes('@g.us')) return res.sendStatus(200); // ignora gruppi
-    if (!txt || txt.length < 2) return res.sendStatus(200);
+    // Log per debug
+    console.log("WEBHOOK from", instanceName, JSON.stringify(payload).slice(0,500));
 
-    console.log(`[JOB] ${instanceName} da ${jid}: ${txt.substring(0,50)}`);
+    // Evolution manda formati diversi, gestiamo tutti
+    const data = payload.data || payload;
+    const messageText = data.message?.conversation || data.message?.extendedTextMessage?.text || data.message?.text || payload.message || "";
+    const remoteJid = data.key?.remoteJid || payload.remoteJid || data.remoteJid || "";
+    const fromMe = data.key?.fromMe || false;
 
-    await db.collection('jobs').add({
-      professionalId: instanceName,
-      clientPhone: jid.replace('@s.whatsapp.net',''),
-      clientJid: jid,
-      description: txt,
-      status: 'nuovo',
-      source: 'whatsapp',
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+    // Ignora i tuoi messaggi
+    if (fromMe || !messageText || !remoteJid) {
+      return res.json({ ignored: true });
+    }
 
-    res.sendStatus(200);
-  } catch(e){ 
-    console.error("Webhook err:", e.message);
-    res.sendStatus(200); 
+    const clientPhone = remoteJid.replace('@s.whatsapp.net','').replace('@g.us','');
+    const clientJid = remoteJid;
+
+    // 1. Cerca se esiste già un job aperto con questo cliente
+    let existingJobQuery = await db.collection('jobs')
+      .where('professionalId', '==', instanceName)
+      .where('clientPhone', '==', clientPhone)
+      .where('status', 'in', ['nuovo','accettato','programmato','in_attesa_conferma'])
+      .orderBy('createdAt','desc')
+      .limit(1)
+      .get();
+
+    if (!existingJobQuery.empty) {
+      // È una RISPOSTA del cliente a un appuntamento!
+      const jobDoc = existingJobQuery.docs[0];
+      const jobId = jobDoc.id;
+
+      await db.collection('jobs').doc(jobId).update({
+        clientLastReply: messageText,
+        clientLastReplyAt: admin.firestore.FieldValue.serverTimestamp(),
+        status: 'confermato_da_cliente', // <-- QUESTO è quello che legge l'app dell'idraulico!
+        clientConfirmed: true
+      });
+
+      console.log(`Cliente ${clientPhone} ha risposto al job ${jobId}: ${messageText}`);
+      return res.json({ success: true, type: 'client_reply', jobId: jobId, reply: messageText });
+
+    } else {
+      // È un NUOVO cliente che scrive per la prima volta
+      const newJob = {
+        professionalId: instanceName,
+        clientPhone: clientPhone,
+        clientJid: clientJid,
+        description: messageText,
+        status: 'nuovo',
+        source: 'whatsapp',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+      const docRef = await db.collection('jobs').add(newJob);
+      console.log(`Nuovo job creato ${docRef.id} da ${clientPhone}`);
+      return res.json({ success: true, type: 'new_job', jobId: docRef.id });
+    }
+
+  } catch (err) {
+    console.error("Webhook error:", err.message);
+    res.json({ error: err.message, received: true }); // Rispondi sempre 200 a Evolution
   }
 });
+
 // --- 7. SIMULA MESSAGGIO CLIENTE (per testare senza WhatsApp) ---
 app.post('/simulate-message', async (req, res) => {
   try {

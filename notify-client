@@ -1,0 +1,67 @@
+app.post('/notify-client', async (req, res) => {
+  try {
+    let { jobId } = req.body;
+    if (!jobId) return res.status(400).json({ error: "Serve jobId" });
+    
+    let jobDoc = null;
+    let foundCollection = null;
+    
+    // Prova 4 posti diversi dove potrebbe essere il job
+    const collectionsToTry = ['jobs', 'Jobs'];
+    
+    for (let col of collectionsToTry) {
+      try {
+        let doc = await db.collection(col).doc(jobId).get();
+        if (doc.exists) { jobDoc = doc; foundCollection = col; break; }
+        // Prova case-insensitive
+        let all = await db.collection(col).limit(200).get();
+        let f = all.docs.find(d => d.id.toLowerCase() === jobId.toLowerCase());
+        if (f) { jobDoc = f; jobId = f.id; foundCollection = col; break; }
+      } catch(e){}
+    }
+    
+    if (!jobDoc || !jobDoc.exists) {
+      // Debug: dimmi cosa c'è davvero
+      let debugJobs = await db.collection('jobs').limit(5).get().catch(()=>({docs:[]}));
+      let debugJobs2 = await db.collection('Jobs').limit(5).get().catch(()=>({docs:[]}));
+      return res.status(404).json({ 
+        error: "Job non trovato", 
+        searched: jobId,
+        foundInJobs: debugJobs.docs.map(d=>d.id),
+        foundInJobsCaps: debugJobs2.docs.map(d=>d.id),
+        hint: "La collection potrebbe chiamarsi Jobs con maiuscola, ho cercato in entrambe"
+      });
+    }
+
+    const job = jobDoc.data();
+    const clientPhone = job.clientPhone;
+    const professionalId = cleanName(job.professionalId);
+    const appointmentAt = job.appointmentAt ? new Date(job.appointmentAt.seconds ? job.appointmentAt.toDate() : job.appointmentAt) : new Date();
+    if (!clientPhone) return res.status(400).json({ error: "Manca clientPhone" });
+
+    let professionalName = job.professionalName || "Marco";
+    let professione = job.profession || job.category || "l'idraulico";
+    if (professionalId.includes("idraulico")) professione = "l'idraulico";
+    if (professionalId.includes("elettricista")) professione = "l'elettricista";
+    if (professionalId.includes("fabbro")) professione = "il fabbro";
+    if (!professione.startsWith("l'") && !professione.startsWith("il ")) professione = `l'${professione}`;
+
+    let dataFormattata = appointmentAt.toLocaleString('it-IT', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
+    const isUpdate = job.lastNotifiedAt ? true : false;
+    let message = isUpdate ? `Ciao! Sono ${professionalName} ${professione} 👋\nAggiornamento: appuntamento spostato a ${dataFormattata}${job.appointmentAddress ? ` in ${job.appointmentAddress}` : ''}` : `Ciao! Sono ${professionalName} ${professione} 👋\nTi confermo l'appuntamento per ${dataFormattata}${job.appointmentAddress ? ` in ${job.appointmentAddress}` : ''}\n\nScrivimi qui se hai bisogno!`;
+
+    try { await axios.post(`${EVOLUTION_URL}/message/sendText/${professionalId}`, { number: clientPhone, text: message }, { headers: { apikey: EVOLUTION_APIKEY } }); } catch(e){ console.log("Evolution warning:", e.message); }
+
+    await db.collection(foundCollection).doc(jobId).update({
+      lastNotifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+      lastNotificationText: message,
+      status: 'programmato'
+    });
+
+    res.json({ success: true, sentTo: clientPhone, message, jobId, foundIn: foundCollection });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});

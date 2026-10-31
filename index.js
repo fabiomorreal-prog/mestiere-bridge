@@ -101,7 +101,6 @@ app.get('/pairing-code/:instance', async (req, res) => {
 });
 
 // --- 4. NUOVO: RICHIESTA CODICE 8 CIFRE PER AUTO-COLLEGAMENTO APP ---
-// Chiamata dall'app Mestiere: POST /request-pairing-code { professionalId, phone: "39347..." }
 app.post('/request-pairing-code', async (req, res) => {
   try {
     const { professionalId, phone } = req.body;
@@ -109,52 +108,54 @@ app.post('/request-pairing-code', async (req, res) => {
       return res.status(400).json({ error: "Servono professionalId e phone" });
     }
     const instanceName = cleanName(professionalId);
-    const cleanPhone = phone.replace(/[^0-9]/g, ""); // solo numeri, es 393471234567
+    const cleanPhone = phone.replace(/[^0-9]/g, "");
 
-    // Prova a creare l'istanza se non esiste
-    try { await createInstanceLogic(instanceName); } catch (e) {
-      if (!JSON.stringify(e.response?.data).includes("already in use")) throw e;
-    }
-
-    // Evolution v2: pairing code si ottiene con ?number=
-    // Proviamo due formati per compatibilità
     let evoRes;
     try {
-      // Formato 1: GET con number come query
       evoRes = await axios.get(`${EVOLUTION_URL}/instance/connect/${instanceName}`, {
         headers: { apikey: EVOLUTION_APIKEY },
         params: { number: cleanPhone }
       });
     } catch (err) {
-      // Formato 2: PUT con body { number }
-      evoRes = await axios.put(`${EVOLUTION_URL}/instance/connect/${instanceName}`, {
-        number: cleanPhone
-      }, { headers: { apikey: EVOLUTION_APIKEY } });
+      try {
+        evoRes = await axios.put(`${EVOLUTION_URL}/instance/connect/${instanceName}`, {
+          number: cleanPhone
+        }, { headers: { apikey: EVOLUTION_APIKEY } });
+      } catch (err2) {
+        // ultimo tentativo: POST /instance/connect/:instance
+        evoRes = await axios.post(`${EVOLUTION_URL}/instance/connect/${instanceName}`, {
+          number: cleanPhone
+        }, { headers: { apikey: EVOLUTION_APIKEY } });
+      }
     }
 
     const data = evoRes.data;
-    // Normalizza risposta: può essere pairingCode, code, ecc.
     const pairingCode = data.pairingCode || data.code || data.pairing_code || null;
 
-    await db.collection('professionals').doc(instanceName).set({
-      lastPairingPhone: cleanPhone,
-      lastPairingCode: pairingCode,
-      lastPairingAt: admin.firestore.FieldValue.serverTimestamp()
-    }, { merge: true });
+    // Salva su Firebase ma NON bloccare se fallisce
+    try {
+      await db.collection('professionals').doc(instanceName).set({
+        lastPairingPhone: cleanPhone,
+        lastPairingCode: pairingCode,
+        lastPairingAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+    } catch (fbErr) {
+      console.log("Firebase save warning (ignoro):", fbErr.message);
+    }
 
     res.json({
       success: true,
       instance: instanceName,
       phone: cleanPhone,
-      pairingCode: pairingCode, // es. "A1B2C3D4" o "2@...."
+      pairingCode: pairingCode,
       qrBase64: data.base64 || data.qrcode?.base64 || null,
-      fullResponse: data, // utile per debug
-      instructions: "Vai su WhatsApp > Dispositivi collegati > Collega un dispositivo > Collega con numero di telefono invece > Inserisci il pairingCode"
+      fullResponse: data,
+      instructions: "WhatsApp > Dispositivi collegati > Collega con numero di telefono"
     });
 
   } catch (err) {
-    console.error(err.response?.data || err.message);
-    res.status(500).json({ error: err.response?.data || err.message });
+    console.error("Pairing error:", err.response?.data || err.message);
+    res.status(500).json({ error: err.response?.data || err.message, details: err.message });
   }
 });
 

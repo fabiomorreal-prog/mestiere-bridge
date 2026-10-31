@@ -202,7 +202,37 @@ app.post('/webhook', async (req, res) => {
     res.sendStatus(200); 
   }
 });
+// --- 7. SIMULA MESSAGGIO CLIENTE (per testare senza WhatsApp) ---
+app.post('/simulate-message', async (req, res) => {
+  try {
+    const { professionalId, clientPhone, text } = req.body;
+    const instanceName = cleanName(professionalId);
+    
+    if (!text) return res.status(400).json({ error: "Serve text" });
 
+    const job = {
+      professionalId: instanceName,
+      clientPhone: clientPhone || "393400000000",
+      clientJid: (clientPhone || "393400000000") + "@s.whatsapp.net",
+      description: text,
+      status: 'nuovo',
+      source: 'whatsapp_simulated',
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    // Prova a scrivere, se Firebase da errore lo logghiamo ma non blocchiamo
+    try {
+      const docRef = await db.collection('jobs').add(job);
+      res.json({ success: true, jobId: docRef.id, job, message: "Finto cliente creato! Controlla Firebase -> jobs" });
+    } catch (fbErr) {
+      console.log("Firebase err:", fbErr.message);
+      res.json({ success: true, simulated: true, job, warning: "Firebase non scrive ancora, ma il webhook è OK", firebaseError: fbErr.message });
+    }
+
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 // --- HOME ---
 app.get('/', (req,res) => res.send(`Mestiere Bridge v4 OK - Auto-pairing ready - ${new Date().toISOString()}`));
 
